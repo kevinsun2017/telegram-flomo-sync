@@ -21,11 +21,19 @@ export default async function handler(req) {
   // 2. 环境变量解构 (直接信任配置正确)
   const {
     TG_BOT_TOKEN,
-    FLOMO_API, 
     CLOUDINARY_CLOUD_NAME,
     CLOUDINARY_API_KEY,
     CLOUDINARY_API_SECRET
   } = process.env;
+
+  // 兼容 FLOMO_API 或 FLOMO_TOKEN 两个变量名
+  const FLOMO_API = process.env.FLOMO_API || process.env.FLOMO_TOKEN;
+
+  // 简单检查 URL 是否存在
+  if (!FLOMO_API || !FLOMO_API.startsWith('http')) {
+      console.error('Error: Invalid FLOMO_API URL', FLOMO_API);
+      return new Response('Config Error: FLOMO_API missing', { status: 200 });
+  }
 
   try {
     const data = await req.json();
