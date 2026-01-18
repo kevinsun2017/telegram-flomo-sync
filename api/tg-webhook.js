@@ -2,86 +2,115 @@ export const config = {
   runtime: 'edge',
 };
 
-// 图床+同步核心逻辑
-export default async function handler(req) {
-  // 环境变量（Vercel里配置4个）
-  const TG_BOT_TOKEN = process.env.TG_BOT_TOKEN;
-  const FLOMO_TOKEN = process.env.FLOMO_TOKEN;
-  const CLOUDINARY_CLOUD_NAME = process.env.CLOUDINARY_CLOUD_NAME;
-  const CLOUDINARY_API_KEY = process.env.CLOUDINARY_API_KEY;
-  const CLOUDINARY_API_SECRET = process.env.CLOUDINARY_API_SECRET;
-  const FLOMO_API = 'https://flomoapp.com/iwh/xxx/api/memo';
-
-  // 校验环境变量齐全
-  if (!TG_BOT_TOKEN || !FLOMO_TOKEN || !CLOUDINARY_CLOUD_NAME || !CLOUDINARY_API_KEY || !CLOUDINARY_API_SECRET) {
-    return new Response('Missing Env Vars', { status: 400 });
-  }
-
-  const data = await req.json();
-  const { message } = data;
-  let content = '';
-
-  // 1. 处理图片消息（转存Cloudinary）
-  if (message?.photo && message.photo.length > 0) {
-    try {
-      // 取Telegram最高清图片
-      const hdPhoto = message.photo.at(-1);
-      // 第一步：获取Telegram图片临时直链
-      const fileRes = await fetch(`https://api.telegram.org/bot${TG_BOT_TOKEN}/getFile?file_id=${hdPhoto.file_id}`);
-      const fileData = await fileRes.json();
-      const tgTempUrl = `https://api.telegram.org/file/bot${TG_BOT_TOKEN}/${fileData.result.file_path}`;
-
-      // 第二步：Cloudinary直接拉取TG图片转存（无需本地下载）
-      const cloudinaryUploadUrl = `https://api.cloudinary.com/v1_1/${CLOUDINARY_CLOUD_NAME}/image/upload`;
-      const uploadForm = new URLSearchParams();
-      uploadForm.append('file', tgTempUrl);
-      uploadForm.append('api_key', CLOUDINARY_API_KEY);
-      uploadForm.append('timestamp', Math.floor(Date.now() / 1000).toString());
-      // 生成签名防篡改
-      const signatureStr = `file=${tgTempUrl}&timestamp=${uploadForm.get('timestamp')}${CLOUDINARY_API_SECRET}`;
-      const signature = await sha1(signatureStr);
-      uploadForm.append('signature', signature);
-
-      const uploadRes = await fetch(cloudinaryUploadUrl, {
-        method: 'POST',
-        body: uploadForm,
-        timeout: 8000 // 适配Vercel 10s超时
-      });
-      const uploadData = await uploadRes.json();
-
-      // 第三步：拼接flomo可显示的图片链接+标签
-      content = `![Telegram图片](${uploadData.secure_url})\n#Telegram #图片同步`;
-    } catch (e) {
-      return new Response('Image Upload Fail', { status: 500 });
-    }
-  }
-  // 2. 处理文本消息（兼容原有逻辑，保留换行）
-  else if (message?.text && !message.text.startsWith('/')) {
-    content = message.text.replace(/\n/g, '<br>') + '\n#Telegram文本';
-  }
-  // 3. 过滤命令消息（/start等）
-  else {
-    return new Response('Skip', { status: 200 });
-  }
-
-  // 4. 同步到Flomo
-  try {
-    await fetch(FLOMO_API, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ content, token: FLOMO_TOKEN }),
-      timeout: 5000
-    });
-    return new Response('Sync Success', { status: 200 });
-  } catch (e) {
-    return new Response('Flomo Sync Fail', { status: 500 });
-  }
-}
-
-// 辅助函数：生成Cloudinary所需SHA1签名（Edge环境兼容）
+// 辅助函数：SHA1 签名
 async function sha1(str) {
   const encoder = new TextEncoder();
   const data = encoder.encode(str);
   const hash = await crypto.subtle.digest('SHA-1', data);
-  return Array.from(new Uint8Array(hash)).map(b => b.toString(16).padStart(2, '0')).join('');
+  return Array.from(new Uint8Array(hash))
+    .map((b) => b.toString(16).padStart(2, '0'))
+    .join('');
+}
+
+export default async function handler(req) {
+  // 1. 验证请求方式
+  if (req.method !== 'POST') {
+    return new Response('Method Not Allowed', { status: 405 });
+  }
+
+  // 2. 环境变量解构 (直接信任配置正确)
+  const {
+    TG_BOT_TOKEN,
+    FLOMO_API, 
+    CLOUDINARY_CLOUD_NAME,
+    CLOUDINARY_API_KEY,
+    CLOUDINARY_API_SECRET
+  } = process.env;
+
+  try {
+    const data = await req.json();
+    const message = data.message;
+    if (!message) return new Response('OK', { status: 200 });
+
+    // 3. 提取内容 (保留原格式)
+    // Telegram 文本在 .text，带图时文本在 .caption
+    let content = message.text || message.caption || '';
+    
+    // 如果没有内容且没有图片，直接返回
+    if (!content && (!message.photo || message.photo.length === 0)) {
+       return new Response('Empty Content', { status: 200 });
+    }
+
+    // 给内容加个小尾巴
+    if (content) content += '\n\n#Telegram';
+    else content = '#Telegram图片';
+
+    // 4. 处理图片 (Cloudinary -> image_urls)
+    const imageUrls = [];
+    if (message.photo && message.photo.length > 0) {
+      // 获取最大分辨率图片
+      const hdPhoto = message.photo.at(-1);
+      
+      // A. 获取 Telegram 文件路径
+      const fileRes = await fetch(`https://api.telegram.org/bot${TG_BOT_TOKEN}/getFile?file_id=${hdPhoto.file_id}`);
+      const fileData = await fileRes.json();
+      const tgFileUrl = `https://api.telegram.org/file/bot${TG_BOT_TOKEN}/${fileData.result.file_path}`;
+
+      // B. 上传到 Cloudinary
+      const timestamp = Math.floor(Date.now() / 1000).toString();
+      const paramsToSign = `timestamp=${timestamp}${CLOUDINARY_API_SECRET}`;
+      const signature = await sha1(paramsToSign);
+
+      const formData = new FormData();
+      formData.append('file', tgFileUrl);
+      formData.append('api_key', CLOUDINARY_API_KEY);
+      formData.append('timestamp', timestamp);
+      formData.append('signature', signature);
+
+      const uploadRes = await fetch(
+        `https://api.cloudinary.com/v1_1/${CLOUDINARY_CLOUD_NAME}/image/upload`,
+        { method: 'POST', body: formData }
+      );
+      const uploadData = await uploadRes.json();
+
+      if (uploadData.secure_url) {
+        imageUrls.push(uploadData.secure_url);
+      }
+    }
+
+    // 5. 发送到 Flomo
+    const payload = {
+      content: content,
+      image_urls: imageUrls.length > 0 ? imageUrls : undefined
+    };
+
+    const flomoRes = await fetch(FLOMO_API, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload)
+    });
+
+    if (!flomoRes.ok) {
+      throw new Error(`Flomo status: ${flomoRes.status}`);
+    }
+
+    // 6. 成功回执 (Telegram)
+    await fetch(`https://api.telegram.org/bot${TG_BOT_TOKEN}/sendMessage`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        chat_id: message.chat.id,
+        text: '✅ 已同步到 Flomo',
+        reply_to_message_id: message.message_id,
+        disable_notification: true
+      })
+    });
+
+    return new Response('Success', { status: 200 });
+
+  } catch (err) {
+    console.error(err);
+    // 出错也不要让 Telegram 重试，直接返回 200，但可以在 logs 里看错误
+    return new Response(`Error: ${err.message}`, { status: 200 });
+  }
 }

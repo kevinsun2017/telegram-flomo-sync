@@ -1,0 +1,10 @@
+{
+  "name": "telegram-flomo-sync",
+  "version": "1.0.0",
+  "type": "module",
+  "main": "api/tg-webhook.js",
+  "scripts": {
+    "start": "vercel dev"
+  },
+  "dependencies": {}
+}
