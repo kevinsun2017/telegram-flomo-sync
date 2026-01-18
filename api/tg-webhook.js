@@ -96,7 +96,7 @@ export default async function handler(req) {
     // 5. 发送到 Flomo
     const payload = {
       content: content,
-      image_urls: imageUrls.length > 0 ? encodeURIComponent(JSON.stringify(imageUrls)) : undefined
+      image_urls: imageUrls.length > 0 ? imageUrls : undefined
     };
 
     const flomoRes = await fetch(FLOMO_API, {
