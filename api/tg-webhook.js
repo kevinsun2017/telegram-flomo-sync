@@ -29,6 +29,13 @@ export default async function handler(req) {
   // 兼容 FLOMO_API 或 FLOMO_TOKEN 两个变量名
   const FLOMO_API = process.env.FLOMO_API || process.env.FLOMO_TOKEN;
 
+  // 详细调试日志 (只显示前4位，防止泄漏)
+  console.log('Env Check:', {
+    TG_BOT_TOKEN: TG_BOT_TOKEN ? (TG_BOT_TOKEN.substring(0,4) + '...') : 'MISSING',
+    FLOMO_API: FLOMO_API ? (FLOMO_API.substring(0,4) + '...') : 'MISSING',
+    CLOUD_NAME: CLOUDINARY_CLOUD_NAME ? 'SET' : 'MISSING'
+  });
+
   // 简单检查 URL 是否存在
   if (!FLOMO_API || !FLOMO_API.startsWith('http')) {
       console.error('Error: Invalid FLOMO_API URL', FLOMO_API);
@@ -89,7 +96,7 @@ export default async function handler(req) {
     // 5. 发送到 Flomo
     const payload = {
       content: content,
-      image_urls: imageUrls.length > 0 ? imageUrls : undefined
+      image_urls: imageUrls.length > 0 ? encodeURIComponent(JSON.stringify(imageUrls)) : undefined
     };
 
     const flomoRes = await fetch(FLOMO_API, {
