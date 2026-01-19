@@ -65,7 +65,7 @@ async function getImageUrl(fileId) {
     );
     const path = fileRes.data.result.file_path;
 
-    if (!/\\.(jpg|jpeg|png|gif|webp)$/i.test(path)) {
+    if (!/\.(jpg|jpeg|png|gif|webp)$/i.test(path)) {
       console.debug('非图片格式，跳过:', path);
       return '';
     }
@@ -93,13 +93,11 @@ async function getImageUrl(fileId) {
     form.append('resource_type', 'image');
 
     console.debug('开始上传 Cloudinary...');
-    const res = await fetchWithRetry(uploadUrl, {
-      method: 'POST',
+    const res = await axios.post(uploadUrl, form, {
       headers: { ...form.getHeaders() },
-      data: form,
-      timeout: REQUEST_TIMEOUTS.CLOUDINARY_UPLOAD,
       maxContentLength: Infinity,
-      maxBodyLength: Infinity
+      maxBodyLength: Infinity,
+      timeout: REQUEST_TIMEOUTS.CLOUDINARY_UPLOAD
     });
     console.debug('Cloudinary 上传完成');
 
@@ -322,34 +320,40 @@ bot.on(['message', 'edited_message'], async (ctx) => {
  * Vercel Serverless 入口
  */
 module.exports = async (req, res) => {
-  // 仅对 POST 请求进行 Secret 验证
-  if (req.method === 'POST') {
-    const secret = process.env.TELEGRAM_WEBHOOK_SECRET;
-    // 若 secret 未配置，仅在生产环境返回 403，开发环境可跳过
-    if (secret && req.headers['x-telegram-bot-api-secret-token'] !== secret) {
-      return res.status(403).json({ error: 'Forbidden' });
-    }
-  }
+  // 步骤1：全局声明 secret 变量，解决 "secret is not defined" 引用错误
+  // 从 Vercel 环境变量中取值，确保整个函数内可访问
+  const secret = process.env.TELEGRAM_WEBHOOK_SECRET;
 
   try {
-    if (process.env.VERCEL_ENV && !process.env.WEBHOOK_SET) {
-      const url = `https://${req.headers.host}/api`;
-      await bot.telegram.setWebhook(url, { secret_token: secret });
-      console.info('Webhook 已自动设置:', url);
-      process.env.WEBHOOK_SET = 'true';
+    // 步骤2：区分请求方法，仅对 POST 请求进行 secret 验证，解决静态资源 403 问题
+    if (req.method === 'POST') {
+      // 补充：非空判断，避免环境变量未配置导致的误判
+      if (!secret) {
+        console.error('错误：TELEGRAM_WEBHOOK_SECRET 环境变量未配置');
+        return res.status(500).json({ error: 'Server Configuration Error' });
+      }
+      // 权限验证：比对 Telegram 携带的令牌与环境变量中的 secret
+      if (req.headers['x-telegram-bot-api-secret-token'] !== secret) {
+        return res.status(403).json({ error: 'Forbidden' });
+      }
     }
 
-    // 仅对 Telegram webhook 请求处理业务逻辑
+    // 步骤3：仅对 POST 请求处理 Webhook 业务逻辑，GET 请求兜底返回 200
     if (req.method === 'POST' && req.body) {
+      // Webhook 自动设置（仅在首次请求时执行）
+      if (process.env.VERCEL_ENV && !global.webhookSet) {
+        const url = `https://${req.headers.host}/api`;
+        await bot.telegram.setWebhook(url, { secret_token: secret });
+        console.info('Webhook 已自动设置:', url);
+        global.webhookSet = true;
+      }
       await bot.handleUpdate(req.body, res);
     } else {
-      // 静态资源或空请求直接返回 200 OK
-      res.status(200).json({
-        status: 'ok',
-        message: 'Static resource or empty request'
-      }).end();
+      // 静态资源（如 favicon.ico）请求直接返回正常响应，避免 403/500
+      res.status(200).end();
     }
   } catch (err) {
+    // 异常捕获，避免进程崩溃，方便调试
     console.error('Webhook 错误:', err);
     res.status(500).json({ error: 'Internal Error' });
   }
