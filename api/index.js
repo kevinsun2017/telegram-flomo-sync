@@ -60,7 +60,9 @@ async function getImageUrl(fileId) {
     console.debug('开始处理 file_id:', fileId);
 
     const fileRes = await fetchWithRetry(
-      `https://api.telegram.org/bot${process.env.TELEGRAM_BOT_TOKEN}/getFile?file_id=${fileId}`,\n      { timeout: REQUEST_TIMEOUTS.TELEGRAM_API }\n    );
+      `https://api.telegram.org/bot${process.env.TELEGRAM_BOT_TOKEN}/getFile?file_id=${fileId}`,
+      { timeout: REQUEST_TIMEOUTS.TELEGRAM_API }
+    );
     const path = fileRes.data.result.file_path;
 
     if (!/\\.(jpg|jpeg|png|gif|webp)$/i.test(path)) {
