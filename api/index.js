@@ -102,11 +102,11 @@ async function getImageUrl(fileId) {
       maxBodyLength: Infinity,
       timeout: REQUEST_TIMEOUTS.CLOUDINARY_UPLOAD
     });
-    console.debug('Cloudinary 上传完成');
+    console.debug('Cloudinary Uploaded');
  
     const url = res.data.secure_url;
     if (url) {
-      console.info('✅ Cloudinary 上传成功:', url);
+      console.info('✅ Cloudinary Uploaded:', url);
       return url;
     }
     throw new Error('无 secure_url');
@@ -119,7 +119,7 @@ async function getImageUrl(fileId) {
       cloudinaryAttempt: true
     });
     if (tgUrl) {
-      console.warn('⚠️ Cloudinary 失败，降级使用 Telegram 临时链接:', tgUrl);
+      console.warn('⚠️ Cloudinary failed, falling back to Telegram temporary link:', tgUrl);
       return tgUrl;
     }
     return '';
