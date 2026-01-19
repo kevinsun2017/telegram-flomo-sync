@@ -103,7 +103,7 @@ async function getImageUrl(fileId) {
 
     const url = res.data.secure_url;
     if (url) {
-      console.info('Cloudinary 成功:', url.slice(0, 60) + '...');
+      console.info('✅ Cloudinary 上传成功:', url);
       return url;
     }
     throw new Error('无 secure_url');
@@ -115,7 +115,7 @@ async function getImageUrl(fileId) {
       timestamp: new Date().toISOString()
     });
     if (tgUrl) {
-      console.warn('Cloudinary 失败，降级使用 Telegram 临时链接');
+      console.warn('⚠️ Cloudinary 失败，降级使用 Telegram 临时链接:', tgUrl);
       return tgUrl;
     }
     return '';
@@ -143,7 +143,7 @@ async function syncToFlomo(content) {
       headers: { 'Content-Type': 'application/json' },
       timeout: REQUEST_TIMEOUTS.FLOMO_API
     });
-    console.info('flomo 同步成功');
+    console.info('✅ flomo 同步成功:', content.slice(0, 100) + '...');
   } catch (e) {
     console.error('flomo 同步失败:', {
       error: e.message,
@@ -172,7 +172,7 @@ async function handleSingle(chatId, content, photos, processingMsgId) {
 
   let final = content || '';
   if (urls.length) {
-    const sec = urls.map((u, i) => `![图片 ${i+1}](${u})`).join('\n\n');
+    const sec = urls.map((u, i) => `[查看图片${i+1}](${u})`).join('\n\n');
     final = final ? `${final}\n\n${sec}` : sec;
   }
 
@@ -265,7 +265,7 @@ bot.on(['message', 'edited_message'], async (ctx) => {
       try {
         let final = cache.content ? `${cache.content}\n\n` : '';
         if (cache.urls.length) {
-          final += cache.urls.map((u,i)=>`![图片 ${i+1}](${u})`).join('\n\n');
+          final += cache.urls.map((u,i)=>`[查看图片${i+1}](${u})`).join('\n\n');
         }
 
         await syncToFlomo(final);
