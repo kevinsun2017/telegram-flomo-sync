@@ -155,7 +155,7 @@ async function handleSingle(chatId, content, photos, processingMsgId) {
  * 主消息处理
  */
 bot.on(['message', 'edited_message'], async (ctx) => {
-  const chatId = ctx.chat?.id || ctx.from?.id;
+  const chatId = (ctx.chat && ctx.chat.id) || (ctx.from && ctx.from.id);
 
   // 立即发送“正在处理”反馈
   let processingMsg;
@@ -176,7 +176,7 @@ bot.on(['message', 'edited_message'], async (ctx) => {
     console.debug(`消息 - group:${groupId||'无'}, text:${text.slice(0,30)}...`);
 
     if (!groupId || !photos.length) {
-      await handleSingle(chatId, text, photos, processingMsg?.message_id);
+      await handleSingle(chatId, text, photos, processingMsg && processingMsg.message_id);
       return;
     }
 
@@ -188,7 +188,7 @@ bot.on(['message', 'edited_message'], async (ctx) => {
         timer: null,
         chatId,
         createdAt: Date.now(),
-        processingMsgId: processingMsg?.message_id
+        processingMsgId: processingMsg && processingMsg.message_id
       });
     }
 
@@ -234,7 +234,7 @@ bot.on(['message', 'edited_message'], async (ctx) => {
 
   } catch (err) {
     console.error('处理异常:', err);
-    if (processingMsg?.message_id) {
+    if (processingMsg && processingMsg.message_id) {
       try {
         await bot.telegram.editMessageText(
           chatId,
