@@ -242,7 +242,7 @@ bot.on(['message', 'edited_message'], async (ctx) => {
           null,
           '❌ 处理失败，请稍后重试'
         );
-      } catch {
+      } catch (e) {
         await bot.telegram.sendMessage(chatId, '❌ 处理失败，请稍后重试');
       }
     }
