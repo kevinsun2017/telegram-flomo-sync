@@ -47,6 +47,8 @@ async function fetchWithRetry(url, options, retries = MAX_RETRIES) {
       await new Promise(resolve => setTimeout(resolve, RETRY_DELAY * (i + 1)));
     }
   }
+  // 确保函数总是有返回值
+  throw new Error('所有重试都失败');
 }
 
 /**
@@ -58,12 +60,10 @@ async function getImageUrl(fileId) {
     console.debug('开始处理 file_id:', fileId);
 
     const fileRes = await fetchWithRetry(
-      `https://api.telegram.org/bot${process.env.TELEGRAM_BOT_TOKEN}/getFile?file_id=${fileId}`,
-      { timeout: REQUEST_TIMEOUTS.TELEGRAM_API }
-    );
+      `https://api.telegram.org/bot${process.env.TELEGRAM_BOT_TOKEN}/getFile?file_id=${fileId}`,\n      { timeout: REQUEST_TIMEOUTS.TELEGRAM_API }\n    );
     const path = fileRes.data.result.file_path;
 
-    if (!/\.(jpg|jpeg|png|gif|webp)$/i.test(path)) {
+    if (!/\\.(jpg|jpeg|png|gif|webp)$/i.test(path)) {
       console.debug('非图片格式，跳过:', path);
       return '';
     }
@@ -320,9 +320,13 @@ bot.on(['message', 'edited_message'], async (ctx) => {
  * Vercel Serverless 入口
  */
 module.exports = async (req, res) => {
-  const secret = process.env.TELEGRAM_WEBHOOK_SECRET;
-  if (req.headers['x-telegram-bot-api-secret-token'] !== secret) {
-    return res.status(403).json({ error: 'Forbidden' });
+  // 仅对 POST 请求进行 Secret 验证
+  if (req.method === 'POST') {
+    const secret = process.env.TELEGRAM_WEBHOOK_SECRET;
+    // 若 secret 未配置，仅在生产环境返回 403，开发环境可跳过
+    if (secret && req.headers['x-telegram-bot-api-secret-token'] !== secret) {
+      return res.status(403).json({ error: 'Forbidden' });
+    }
   }
 
   try {
@@ -333,7 +337,16 @@ module.exports = async (req, res) => {
       process.env.WEBHOOK_SET = 'true';
     }
 
-    await bot.handleUpdate(req.body, res);
+    // 仅对 Telegram webhook 请求处理业务逻辑
+    if (req.method === 'POST' && req.body) {
+      await bot.handleUpdate(req.body, res);
+    } else {
+      // 静态资源或空请求直接返回 200 OK
+      res.status(200).json({
+        status: 'ok',
+        message: 'Static resource or empty request'
+      }).end();
+    }
   } catch (err) {
     console.error('Webhook 错误:', err);
     res.status(500).json({ error: 'Internal Error' });
