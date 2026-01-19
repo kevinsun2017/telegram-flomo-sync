@@ -324,16 +324,26 @@ module.exports = async (req, res) => {
   // 从 Vercel 环境变量中取值，确保整个函数内可访问
   const secret = process.env.TELEGRAM_WEBHOOK_SECRET;
 
+  // 🔍 调试：打印 secret 对比信息
+  if (req.method === 'POST') {
+    console.log('🔍 [DEBUG] 请求头中的 secret:', req.headers['x-telegram-bot-api-secret-token']);
+    console.log('🔍 [DEBUG] Vercel 配置的 secret:', secret);
+  }
+
   try {
     // 步骤2：区分请求方法，仅对 POST 请求进行 secret 验证，解决静态资源 403 问题
     if (req.method === 'POST') {
       // 补充：非空判断，避免环境变量未配置导致的误判
       if (!secret) {
-        console.error('错误：TELEGRAM_WEBHOOK_SECRET 环境变量未配置');
+        console.error('❌ 错误：TELEGRAM_WEBHOOK_SECRET 环境变量未配置');
         return res.status(500).json({ error: 'Server Configuration Error' });
       }
       // 权限验证：比对 Telegram 携带的令牌与环境变量中的 secret
       if (req.headers['x-telegram-bot-api-secret-token'] !== secret) {
+        console.error('❌ 权限验证失败:', {
+          received: req.headers['x-telegram-bot-api-secret-token'],
+          expected: secret
+        });
         return res.status(403).json({ error: 'Forbidden' });
       }
     }
