@@ -3,13 +3,13 @@ require('dotenv').config();
 const { Telegraf } = require('telegraf');
 const axios = require('axios');
 const FormData = require('form-data');
-
+ 
 const bot = new Telegraf(process.env.TELEGRAM_BOT_TOKEN);
-
+ 
 // 配置常量
 const MAX_IMAGES = 9;
 const DEBOUNCE_TIME = 2000;           // 多图聚合等待时间
-const MAX_CONTENT = 5000;             // Flomo 内容限制（官方标准）
+const MAX_CONTENT = 4500;             // flomo 安全阈值
 const mediaGroupCache = new Map();    // 多图聚合缓存
 const REQUEST_TIMEOUTS = {
   TELEGRAM_API: 5000,
@@ -19,20 +19,7 @@ const REQUEST_TIMEOUTS = {
 };
 const MAX_RETRIES = 2;
 const RETRY_DELAY = 1000;
-
-/**
- * 验证图片URL是否有效
- */
-function isValidImageUrl(url) {
-  if (!url || !url.trim()) return false;
-  try {
-    new URL(url);
-    return url.startsWith('https://');
-  } catch {
-    return false;
-  }
-}
-
+ 
 // 定时清理过期缓存，防止内存泄漏
 setInterval(() => {
   const now = Date.now();
@@ -43,7 +30,7 @@ setInterval(() => {
     }
   }
 }, 60000);
-
+ 
 /**
  * 带重试机制的 axios 请求
  */
@@ -63,7 +50,7 @@ async function fetchWithRetry(url, options, retries = MAX_RETRIES) {
   // 确保函数总是有返回值
   throw new Error('所有重试都失败');
 }
-
+ 
 /**
  * 获取图片公网链接：优先 Cloudinary，失败降级 Telegram 临时链接
  */
@@ -71,21 +58,21 @@ async function getImageUrl(fileId) {
   let tgUrl = '';
   try {
     console.debug('开始处理 file_id:', fileId);
-
+ 
     const fileRes = await fetchWithRetry(
       `https://api.telegram.org/bot${process.env.TELEGRAM_BOT_TOKEN}/getFile?file_id=${fileId}`,
       { timeout: REQUEST_TIMEOUTS.TELEGRAM_API }
     );
     const path = fileRes.data.result.file_path;
-
+ 
     if (!/\.(jpg|jpeg|png|gif|webp)$/i.test(path)) {
       console.debug('非图片格式，跳过:', path);
       return '';
     }
-
+ 
     tgUrl = `https://api.telegram.org/file/bot${process.env.TELEGRAM_BOT_TOKEN}/${path}`;
     console.debug('TG 文件路径:', path);
-
+ 
     if (!process.env.CLOUDINARY_CLOUD_NAME || !process.env.CLOUDINARY_UPLOAD_PRESET) {
       console.error('❌ Cloudinary 环境变量缺失:', {
         cloudName: process.env.CLOUDINARY_CLOUD_NAME,
@@ -93,21 +80,21 @@ async function getImageUrl(fileId) {
       });
       return tgUrl;
     }
-
+ 
     console.debug('开始下载图片流...');
     const imgStream = await fetchWithRetry(tgUrl, {
       responseType: 'stream',
       timeout: REQUEST_TIMEOUTS.IMAGE_DOWNLOAD
     });
     console.debug('图片流下载完成');
-
+ 
     const uploadUrl = `https://api.cloudinary.com/v1_1/${process.env.CLOUDINARY_CLOUD_NAME}/image/upload`;
-
+ 
     const form = new FormData();
     form.append('file', imgStream.data);
     form.append('upload_preset', process.env.CLOUDINARY_UPLOAD_PRESET);
     form.append('resource_type', 'image');
-
+ 
     console.debug('开始上传 Cloudinary...');
     const res = await axios.post(uploadUrl, form, {
       headers: { ...form.getHeaders() },
@@ -116,7 +103,7 @@ async function getImageUrl(fileId) {
       timeout: REQUEST_TIMEOUTS.CLOUDINARY_UPLOAD
     });
     console.debug('Cloudinary 上传完成');
-
+ 
     const url = res.data.secure_url;
     if (url) {
       console.info('✅ Cloudinary 上传成功:', url);
@@ -138,68 +125,39 @@ async function getImageUrl(fileId) {
     return '';
   }
 }
-
+ 
 /**
  * 同步到 flomo
  */
-async function syncToFlomo(content, imageUrls = []) {
+async function syncToFlomo(content) {
   if (!process.env.FLOMO_WEBHOOK_URL) {
     console.error('FLOMO_WEBHOOK_URL 未配置，跳过同步');
     return;
   }
-  if (!content?.trim() && !imageUrls?.length) return;
-
-  let processedContent = content;
-  if (processedContent.length > MAX_CONTENT) {
-    processedContent = processedContent.substring(0, MAX_CONTENT) + '\n...（内容过长，已截断）';
+  if (!content?.trim()) return;
+ 
+  if (content.length > MAX_CONTENT) {
+    content = content.substring(0, MAX_CONTENT) + '\n...（内容过长，已截断）';
   }
-
-  const payload = {
-    content: processedContent
-  };
-
-  // 处理图片URL
-  if (imageUrls && imageUrls.length > 0) {
-    // 验证和过滤URL
-    const validImageUrls = imageUrls
-      .filter(url => isValidImageUrl(url))
-      .filter((url, index, self) => self.indexOf(url) === index); // 去重
-
-    if (validImageUrls.length > 0) {
-      // 1. 保留 image_urls（为客户端场景预留）
-      payload.image_urls = validImageUrls.slice(0, 9);
-      console.info(`📸 同步 ${validImageUrls.length} 张图片到 Flomo`);
-
-      // 2. Webhook场景降级：拼接超链接到content中
-      const imageLinkStr = validImageUrls.slice(0, 9).map((url, i) => {
-        return `\n\n[查看图片${i+1}](${url})`;
-      }).join('');
-      payload.content = processedContent + imageLinkStr;
-    }
-  }
-
+ 
   try {
     await fetchWithRetry(process.env.FLOMO_WEBHOOK_URL, {
       method: 'POST',
-      data: payload,
+      data: { content },
       headers: { 'Content-Type': 'application/json' },
       timeout: REQUEST_TIMEOUTS.FLOMO_API
     });
-    console.info('✅ flomo 同步成功:', payload.content.slice(0, 100) + '...');
-    if (payload.image_urls) {
-      console.info('📸 图片同步:', payload.image_urls.length, '张');
-    }
+    console.info('✅ flomo 同步成功:', content.slice(0, 100) + '...');
   } catch (e) {
     console.error('flomo 同步失败:', {
       error: e.message,
       stack: e.stack,
       contentLength: content.length,
-      imageCount: imageUrls?.length,
       timestamp: new Date().toISOString()
     });
   }
 }
-
+ 
 /**
  * 处理单条消息（非多图）
  */
@@ -215,15 +173,15 @@ async function handleSingle(chatId, content, photos, processingMsgId) {
     const results = await Promise.all(urlPromises);
     urls = results.filter(u => u);
   }
-
+ 
   let final = content || '';
   if (urls.length) {
     const sec = urls.map((u, i) => `图片${i+1}：${u}`).join('\n\n');
     final = final ? `${final}\n\n${sec}` : sec;
   }
-
-  await syncToFlomo(final, urls);
-
+ 
+  await syncToFlomo(final);
+ 
   // 更新处理中消息为成功
   if (processingMsgId) {
     try {
@@ -239,12 +197,12 @@ async function handleSingle(chatId, content, photos, processingMsgId) {
     }
   }
 }
-
+ 
 /**
  * 主消息处理
  */
 bot.on(['message', 'edited_message'], async (ctx) => {
-  const chatId = (ctx.chat && ctx.chat.id) || (ctx.from && ctx.from.id); // Fixed: Optional chaining
+  const chatId = (ctx.chat && ctx.chat.id) || (ctx.from && ctx.from.id);
   
   // 立即发送"正在处理"反馈
   let processingMsg;
@@ -253,20 +211,20 @@ bot.on(['message', 'edited_message'], async (ctx) => {
   } catch (e) {
     console.debug('发送处理中提示失败:', e.message);
   }
-
+ 
   try {
     const msg = ctx.message || ctx.editedMessage;
     if (!msg) return;
-
+ 
     const text = (msg.text || msg.caption || '').trim();
     const groupId = msg.media_group_id;
     const photos = msg.photo || [];
-
+ 
     console.debug(`消息 - group:${groupId||'无'}, text:${text.slice(0,30)}...`);
-
+ 
     // 检查空消息
     if (!text && (!photos || !photos.length)) {
-      if (processingMsg && processingMsg.message_id) { // Fixed: Optional chaining
+      if (processingMsg && processingMsg.message_id) {
         try {
           await bot.telegram.deleteMessage(chatId, processingMsg.message_id);
         } catch (e) {
@@ -275,12 +233,12 @@ bot.on(['message', 'edited_message'], async (ctx) => {
       }
       return;
     }
-
+ 
     if (!groupId || !photos.length) {
-      await handleSingle(chatId, text, photos, processingMsg && processingMsg.message_id); // Fixed: Optional chaining
+      await handleSingle(chatId, text, photos, processingMsg && processingMsg.message_id);
       return;
     }
-
+ 
     // 多图聚合
     if (!mediaGroupCache.has(groupId)) {
       mediaGroupCache.set(groupId, {
@@ -289,33 +247,33 @@ bot.on(['message', 'edited_message'], async (ctx) => {
         timer: null,
         chatId,
         createdAt: Date.now(),
-        processingMsgId: processingMsg && processingMsg.message_id // Fixed: Optional chaining
+        processingMsgId: processingMsg && processingMsg.message_id
       });
     }
-
+ 
     const cache = mediaGroupCache.get(groupId);
-
+ 
     if (text && !cache.content) cache.content = text;
-
+ 
     if (cache.timer) {
       clearTimeout(cache.timer);
       cache.timer = null;
     }
-
+ 
     if (photos.length && cache.urls.length < MAX_IMAGES) {
       const u = await getImageUrl(photos[photos.length-1].file_id);
       if (u) cache.urls.push(u);
     }
-
+ 
     cache.timer = setTimeout(async () => {
       try {
         let final = cache.content ? `${cache.content}\n\n` : '';
         if (cache.urls.length) {
           final += cache.urls.map((u,i)=>`图片${i+1}：${u}`).join('\n\n');
         }
-
-        await syncToFlomo(final, urls);
-
+ 
+        await syncToFlomo(final);
+ 
         // 更新处理中消息
         if (cache.processingMsgId) {
           try {
@@ -339,7 +297,7 @@ bot.on(['message', 'edited_message'], async (ctx) => {
         mediaGroupCache.delete(groupId);
       }
     }, DEBOUNCE_TIME);
-
+ 
   } catch (err) {
     console.error('处理异常:', {
       error: err.message,
@@ -355,29 +313,27 @@ bot.on(['message', 'edited_message'], async (ctx) => {
           null,
           '❌ 处理失败，请稍后重试'
         );
-      } catch (e) { // Fixed: catch {}
+      } catch (e) {
         await bot.telegram.sendMessage(chatId, '❌ 处理失败，请稍后重试');
       }
     }
   }
 });
-
+ 
 /**
  * Vercel Serverless 入口
  */
 module.exports = async (req, res) => {
-  // 步骤1：全局声明 secret 变量，解决 "secret is not defined" 引用错误
-  // 从 Vercel 环境变量中取值，确保整个函数内可访问
   const secret = process.env.TELEGRAM_WEBHOOK_SECRET;
-
+ 
   // 🔍 调试：打印 secret 对比信息
   if (req.method === 'POST') {
     console.log('🔍 [DEBUG] 请求头中的 secret:', req.headers['x-telegram-bot-api-secret-token']);
     console.log('🔍 [DEBUG] Vercel 配置的 secret:', secret);
   }
-
+ 
   try {
-    // 步骤2：区分请求方法，仅对 POST 请求进行 secret 验证，解决静态资源 403 问题
+    // 仅对 POST 请求进行 secret 验证
     if (req.method === 'POST') {
       // 补充：非空判断，避免环境变量未配置导致的误判
       if (!secret) {
@@ -393,28 +349,26 @@ module.exports = async (req, res) => {
         return res.status(403).json({ error: 'Forbidden' });
       }
     }
-
-    // 步骤3：仅对 POST 请求处理 Webhook 业务逻辑，GET 请求兜底返回 200
+ 
+    if (process.env.VERCEL_ENV && !global.webhookSet) {
+      const url = `https://${req.headers.host}/api`;
+      await bot.telegram.setWebhook(url, { secret_token: secret });
+      console.info('Webhook 已自动设置:', url);
+      global.webhookSet = true;
+    }
+ 
     if (req.method === 'POST' && req.body) {
-      // Webhook 自动设置（仅在首次请求时执行）
-      if (process.env.VERCEL_ENV && !global.webhookSet) {
-        const url = `https://${req.headers.host}/api`;
-        await bot.telegram.setWebhook(url, { secret_token: secret });
-        console.info('Webhook 已自动设置:', url);
-        global.webhookSet = true;
-      }
       await bot.handleUpdate(req.body, res);
     } else {
       // 静态资源（如 favicon.ico）请求直接返回正常响应，避免 403/500
       res.status(200).end();
     }
   } catch (err) {
-    // 异常捕获，避免进程崩溃，方便调试
     console.error('Webhook 错误:', err);
     res.status(500).json({ error: 'Internal Error' });
   }
 };
-
+ 
 if (!process.env.VERCEL) {
   bot.launch().then(() => console.log('本地 Bot 启动'));
   process.once('SIGINT', () => bot.stop('SIGINT'));
