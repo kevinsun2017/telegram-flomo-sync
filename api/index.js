@@ -9,7 +9,7 @@ const bot = new Telegraf(process.env.TELEGRAM_BOT_TOKEN);
 // 配置常量
 const MAX_IMAGES = 9;
 const DEBOUNCE_TIME = 2000;           // 多图聚合等待时间
-const MAX_CONTENT = 4500;             // flomo 安全阈值
+const MAX_CONTENT = 5000;             // Flomo 内容限制（官方标准）
 const mediaGroupCache = new Map();    // 多图聚合缓存
 const REQUEST_TIMEOUTS = {
   TELEGRAM_API: 5000,
@@ -19,6 +19,19 @@ const REQUEST_TIMEOUTS = {
 };
 const MAX_RETRIES = 2;
 const RETRY_DELAY = 1000;
+
+/**
+ * 验证图片URL是否有效
+ */
+function isValidImageUrl(url) {
+  if (!url || !url.trim()) return false;
+  try {
+    new URL(url);
+    return url.startsWith('https://');
+  } catch {
+    return false;
+  }
+}
 
 // 定时清理过期缓存，防止内存泄漏
 setInterval(() => {
@@ -74,7 +87,10 @@ async function getImageUrl(fileId) {
     console.debug('TG 文件路径:', path);
 
     if (!process.env.CLOUDINARY_CLOUD_NAME || !process.env.CLOUDINARY_UPLOAD_PRESET) {
-      console.debug('Cloudinary 未配置，使用 TG 临时链接');
+      console.error('❌ Cloudinary 环境变量缺失:', {
+        cloudName: process.env.CLOUDINARY_CLOUD_NAME,
+        uploadPreset: process.env.CLOUDINARY_UPLOAD_PRESET
+      });
       return tgUrl;
     }
 
@@ -108,11 +124,12 @@ async function getImageUrl(fileId) {
     }
     throw new Error('无 secure_url');
   } catch (e) {
-    console.error('图片处理失败:', {
+    console.error('❌ 图片处理失败:', {
       error: e.message,
       stack: e.stack,
       fileId: fileId,
-      timestamp: new Date().toISOString()
+      timestamp: new Date().toISOString(),
+      cloudinaryAttempt: true
     });
     if (tgUrl) {
       console.warn('⚠️ Cloudinary 失败，降级使用 Telegram 临时链接:', tgUrl);
@@ -125,30 +142,59 @@ async function getImageUrl(fileId) {
 /**
  * 同步到 flomo
  */
-async function syncToFlomo(content) {
+async function syncToFlomo(content, imageUrls = []) {
   if (!process.env.FLOMO_WEBHOOK_URL) {
     console.error('FLOMO_WEBHOOK_URL 未配置，跳过同步');
     return;
   }
-  if (!content?.trim()) return;
+  if (!content?.trim() && !imageUrls?.length) return;
 
-  if (content.length > MAX_CONTENT) {
-    content = content.substring(0, MAX_CONTENT) + '\n...（内容过长，已截断）';
+  let processedContent = content;
+  if (processedContent.length > MAX_CONTENT) {
+    processedContent = processedContent.substring(0, MAX_CONTENT) + '\n...（内容过长，已截断）';
+  }
+
+  const payload = {
+    content: processedContent
+  };
+
+  // 处理图片URL
+  if (imageUrls && imageUrls.length > 0) {
+    // 验证和过滤URL
+    const validImageUrls = imageUrls
+      .filter(url => isValidImageUrl(url))
+      .filter((url, index, self) => self.indexOf(url) === index); // 去重
+
+    if (validImageUrls.length > 0) {
+      // 1. 保留 image_urls（为客户端场景预留）
+      payload.image_urls = validImageUrls.slice(0, 9);
+      console.info(`📸 同步 ${validImageUrls.length} 张图片到 Flomo`);
+
+      // 2. Webhook场景降级：拼接超链接到content中
+      const imageLinkStr = validImageUrls.slice(0, 9).map((url, i) => {
+        return `\n\n[查看图片${i+1}](${url})`;
+      }).join('');
+      payload.content = processedContent + imageLinkStr;
+    }
   }
 
   try {
     await fetchWithRetry(process.env.FLOMO_WEBHOOK_URL, {
       method: 'POST',
-      data: { content },
+      data: payload,
       headers: { 'Content-Type': 'application/json' },
       timeout: REQUEST_TIMEOUTS.FLOMO_API
     });
-    console.info('✅ flomo 同步成功:', content.slice(0, 100) + '...');
+    console.info('✅ flomo 同步成功:', payload.content.slice(0, 100) + '...');
+    if (payload.image_urls) {
+      console.info('📸 图片同步:', payload.image_urls.length, '张');
+    }
   } catch (e) {
     console.error('flomo 同步失败:', {
       error: e.message,
       stack: e.stack,
       contentLength: content.length,
+      imageCount: imageUrls?.length,
       timestamp: new Date().toISOString()
     });
   }
@@ -172,11 +218,11 @@ async function handleSingle(chatId, content, photos, processingMsgId) {
 
   let final = content || '';
   if (urls.length) {
-    const sec = urls.map((u, i) => `[查看图片${i+1}](${u})`).join('\n\n');
+    const sec = urls.map((u, i) => `图片${i+1}：${u}`).join('\n\n');
     final = final ? `${final}\n\n${sec}` : sec;
   }
 
-  await syncToFlomo(final);
+  await syncToFlomo(final, urls);
 
   // 更新处理中消息为成功
   if (processingMsgId) {
@@ -265,10 +311,10 @@ bot.on(['message', 'edited_message'], async (ctx) => {
       try {
         let final = cache.content ? `${cache.content}\n\n` : '';
         if (cache.urls.length) {
-          final += cache.urls.map((u,i)=>`[查看图片${i+1}](${u})`).join('\n\n');
+          final += cache.urls.map((u,i)=>`图片${i+1}：${u}`).join('\n\n');
         }
 
-        await syncToFlomo(final);
+        await syncToFlomo(final, urls);
 
         // 更新处理中消息
         if (cache.processingMsgId) {
