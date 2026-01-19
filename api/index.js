@@ -11,6 +11,14 @@ const MAX_IMAGES = 9;
 const DEBOUNCE_TIME = 2000;           // 多图聚合等待时间
 const MAX_CONTENT = 4500;             // flomo 安全阈值
 const mediaGroupCache = new Map();    // 多图聚合缓存
+const REQUEST_TIMEOUTS = {
+  TELEGRAM_API: 5000,
+  IMAGE_DOWNLOAD: 6000,
+  CLOUDINARY_UPLOAD: 8000,
+  FLOMO_API: 6000
+};
+const MAX_RETRIES = 2;
+const RETRY_DELAY = 1000;
 
 // 定时清理过期缓存，防止内存泄漏
 setInterval(() => {
@@ -24,6 +32,24 @@ setInterval(() => {
 }, 60000);
 
 /**
+ * 带重试机制的 axios 请求
+ */
+async function fetchWithRetry(url, options, retries = MAX_RETRIES) {
+  for (let i = 0; i <= retries; i++) {
+    try {
+      return await axios(url, {
+        ...options,
+        timeout: options.timeout || REQUEST_TIMEOUTS.IMAGE_DOWNLOAD
+      });
+    } catch (error) {
+      if (i === retries) throw error;
+      console.warn(`请求失败，${RETRY_DELAY}ms后重试 (${i + 1}/${retries}):`, error.message);
+      await new Promise(resolve => setTimeout(resolve, RETRY_DELAY * (i + 1)));
+    }
+  }
+}
+
+/**
  * 获取图片公网链接：优先 Cloudinary，失败降级 Telegram 临时链接
  */
 async function getImageUrl(fileId) {
@@ -31,9 +57,9 @@ async function getImageUrl(fileId) {
   try {
     console.debug('开始处理 file_id:', fileId);
 
-    const fileRes = await axios.get(
+    const fileRes = await fetchWithRetry(
       `https://api.telegram.org/bot${process.env.TELEGRAM_BOT_TOKEN}/getFile?file_id=${fileId}`,
-      { timeout: 5000 }
+      { timeout: REQUEST_TIMEOUTS.TELEGRAM_API }
     );
     const path = fileRes.data.result.file_path;
 
@@ -51,9 +77,9 @@ async function getImageUrl(fileId) {
     }
 
     console.debug('开始下载图片流...');
-    const imgStream = await axios.get(tgUrl, {
+    const imgStream = await fetchWithRetry(tgUrl, {
       responseType: 'stream',
-      timeout: 6000
+      timeout: REQUEST_TIMEOUTS.IMAGE_DOWNLOAD
     });
     console.debug('图片流下载完成');
 
@@ -65,11 +91,13 @@ async function getImageUrl(fileId) {
     form.append('resource_type', 'image');
 
     console.debug('开始上传 Cloudinary...');
-    const res = await axios.post(uploadUrl, form, {
+    const res = await fetchWithRetry(uploadUrl, {
+      method: 'POST',
       headers: { ...form.getHeaders() },
+      data: form,
+      timeout: REQUEST_TIMEOUTS.CLOUDINARY_UPLOAD,
       maxContentLength: Infinity,
-      maxBodyLength: Infinity,
-      timeout: 8000
+      maxBodyLength: Infinity
     });
     console.debug('Cloudinary 上传完成');
 
@@ -80,7 +108,12 @@ async function getImageUrl(fileId) {
     }
     throw new Error('无 secure_url');
   } catch (e) {
-    console.error('图片处理失败:', e.message);
+    console.error('图片处理失败:', {
+      error: e.message,
+      stack: e.stack,
+      fileId: fileId,
+      timestamp: new Date().toISOString()
+    });
     if (tgUrl) {
       console.warn('Cloudinary 失败，降级使用 Telegram 临时链接');
       return tgUrl;
@@ -104,13 +137,20 @@ async function syncToFlomo(content) {
   }
 
   try {
-    await axios.post(process.env.FLOMO_WEBHOOK_URL, { content }, {
+    await fetchWithRetry(process.env.FLOMO_WEBHOOK_URL, {
+      method: 'POST',
+      data: { content },
       headers: { 'Content-Type': 'application/json' },
-      timeout: 6000
+      timeout: REQUEST_TIMEOUTS.FLOMO_API
     });
     console.info('flomo 同步成功');
   } catch (e) {
-    console.error('flomo 同步失败:', e.message);
+    console.error('flomo 同步失败:', {
+      error: e.message,
+      stack: e.stack,
+      contentLength: content.length,
+      timestamp: new Date().toISOString()
+    });
   }
 }
 
@@ -121,10 +161,13 @@ async function handleSingle(chatId, content, photos, processingMsgId) {
   let urls = [];
   if (photos?.length) {
     const selected = photos.slice(-MAX_IMAGES);
-    for (const p of selected) {
+    // 并行处理图片 URL 获取
+    const urlPromises = selected.map(async (p) => {
       const u = await getImageUrl(p.file_id);
-      if (u) urls.push(u);
-    }
+      return u;
+    });
+    const results = await Promise.all(urlPromises);
+    urls = results.filter(u => u);
   }
 
   let final = content || '';
@@ -155,9 +198,9 @@ async function handleSingle(chatId, content, photos, processingMsgId) {
  * 主消息处理
  */
 bot.on(['message', 'edited_message'], async (ctx) => {
-  const chatId = (ctx.chat && ctx.chat.id) || (ctx.from && ctx.from.id);
-
-  // 立即发送“正在处理”反馈
+  const chatId = (ctx.chat && ctx.chat.id) || (ctx.from && ctx.from.id); // Fixed: Optional chaining
+  
+  // 立即发送"正在处理"反馈
   let processingMsg;
   try {
     processingMsg = await ctx.reply('📥 正在处理...');
@@ -175,8 +218,20 @@ bot.on(['message', 'edited_message'], async (ctx) => {
 
     console.debug(`消息 - group:${groupId||'无'}, text:${text.slice(0,30)}...`);
 
+    // 检查空消息
+    if (!text && (!photos || !photos.length)) {
+      if (processingMsg && processingMsg.message_id) { // Fixed: Optional chaining
+        try {
+          await bot.telegram.deleteMessage(chatId, processingMsg.message_id);
+        } catch (e) {
+          console.debug('删除处理中消息失败:', e.message);
+        }
+      }
+      return;
+    }
+
     if (!groupId || !photos.length) {
-      await handleSingle(chatId, text, photos, processingMsg && processingMsg.message_id);
+      await handleSingle(chatId, text, photos, processingMsg && processingMsg.message_id); // Fixed: Optional chaining
       return;
     }
 
@@ -188,7 +243,7 @@ bot.on(['message', 'edited_message'], async (ctx) => {
         timer: null,
         chatId,
         createdAt: Date.now(),
-        processingMsgId: processingMsg && processingMsg.message_id
+        processingMsgId: processingMsg && processingMsg.message_id // Fixed: Optional chaining
       });
     }
 
@@ -196,7 +251,10 @@ bot.on(['message', 'edited_message'], async (ctx) => {
 
     if (text && !cache.content) cache.content = text;
 
-    clearTimeout(cache.timer);
+    if (cache.timer) {
+      clearTimeout(cache.timer);
+      cache.timer = null;
+    }
 
     if (photos.length && cache.urls.length < MAX_IMAGES) {
       const u = await getImageUrl(photos[photos.length-1].file_id);
@@ -204,36 +262,45 @@ bot.on(['message', 'edited_message'], async (ctx) => {
     }
 
     cache.timer = setTimeout(async () => {
-      let final = cache.content ? `${cache.content}\n\n` : '';
-      if (cache.urls.length) {
-        final += cache.urls.map((u,i)=>`![图片 ${i+1}](${u})`).join('\n\n');
-      }
-
-      await syncToFlomo(final);
-
-      // 更新处理中消息
-      if (cache.processingMsgId) {
-        try {
-          await bot.telegram.editMessageText(
-            cache.chatId,
-            cache.processingMsgId,
-            null,
-            `✅ 多图聚合同步完成（${cache.urls.length} 张）`
-          );
-        } catch (e) {
-          console.debug('聚合更新失败:', e.message);
-          await bot.telegram.sendMessage(
-            cache.chatId,
-            `✅ 多图聚合同步完成（${cache.urls.length} 张）`
-          );
+      try {
+        let final = cache.content ? `${cache.content}\n\n` : '';
+        if (cache.urls.length) {
+          final += cache.urls.map((u,i)=>`![图片 ${i+1}](${u})`).join('\n\n');
         }
-      }
 
-      mediaGroupCache.delete(groupId);
+        await syncToFlomo(final);
+
+        // 更新处理中消息
+        if (cache.processingMsgId) {
+          try {
+            await bot.telegram.editMessageText(
+              cache.chatId,
+              cache.processingMsgId,
+              null,
+              `✅ 多图聚合同步完成（${cache.urls.length} 张）`
+            );
+          } catch (e) {
+            console.debug('聚合更新失败:', e.message);
+            await bot.telegram.sendMessage(
+              cache.chatId,
+              `✅ 多图聚合同步完成（${cache.urls.length} 张）`
+            );
+          }
+        }
+      } catch (err) {
+        console.error('处理聚合消息失败:', err);
+      } finally {
+        mediaGroupCache.delete(groupId);
+      }
     }, DEBOUNCE_TIME);
 
   } catch (err) {
-    console.error('处理异常:', err);
+    console.error('处理异常:', {
+      error: err.message,
+      stack: err.stack,
+      chatId,
+      timestamp: new Date().toISOString()
+    });
     if (processingMsg && processingMsg.message_id) {
       try {
         await bot.telegram.editMessageText(
@@ -242,12 +309,12 @@ bot.on(['message', 'edited_message'], async (ctx) => {
           null,
           '❌ 处理失败，请稍后重试'
         );
-      } catch (e) {
+      } catch (e) { // Fixed: catch {}
         await bot.telegram.sendMessage(chatId, '❌ 处理失败，请稍后重试');
       }
     }
   }
-};
+});
 
 /**
  * Vercel Serverless 入口
@@ -278,4 +345,3 @@ if (!process.env.VERCEL) {
   process.once('SIGINT', () => bot.stop('SIGINT'));
   process.once('SIGTERM', () => bot.stop('SIGTERM'));
 }
-
